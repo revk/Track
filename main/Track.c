@@ -1,9 +1,8 @@
-// GPS module (tracker and/or display module)
-// Copyright (c) 2019 Adrian Kennard, Andrews & Arnold Limited, see LICENSE file (GPL)
-static const char TAG[] = "GPS";
+// GPS/G-Force high speed logger for go-carting
+// Copyright (c) 2020 Adrian Kennard, Andrews & Arnold Limited, see LICENSE file (GPL)
+static const char TAG[] = "Track";
 
 #include "revk.h"
-#include <esp32/aes.h>
 #include <driver/i2c.h>
 #include <driver/uart.h>
 #include <math.h>
@@ -40,8 +39,18 @@ extern void hmac_sha256 (const uint8_t * key, size_t key_len, const uint8_t * da
 	s8(gpsfix,-1,		GPS Fix GPIO)	\
 	s8(gpsen,-1,		GPS EN GPIO)	\
         u32(gpsbaud,115200,	GPS Baud)	\
-	u32(fixms,1000,		GPS fix rate (ms)) \
+	u32(fixms,100,		GPS fix rate (ms)) \
 	bl(fixdebug,N,		GPS Fix debug log)	\
+	u8(gport,0,		G-Force I2C port) \
+	s8(gscl,-1,		G-Force SCL)	\
+	s8(gsda,-1,		G-Force SDA)	\
+	s8(gint,-1,		G-Force INT)	\
+	u8(arate,0,		G-Force accel rate 0-3) \
+	u8(ascale,0,		G-Force accel scale 0-3) \
+	u8(gscale,0,		G-Force dyro scale 0-3) \
+	u8(gaddress,0x68,	G-Force I2C address) \
+	b(usefifo,N,		G-Force use FIFO) \
+	bl(gdebug,N,		G-Force debug logging)	\
 	b(navstar,Y,		GPS track NAVSTAR GPS)	\
 	b(glonass,Y,		GPS track GLONASS GPS)	\
 	b(galileo,Y,		GPS track GALILEO GPS)	\
@@ -73,11 +82,18 @@ settings
 #undef b
 #undef h
 #undef s
+// Current info values as at end of GGA processing
 float speed = 0;
 float bearing = 0;
 float lat = 0;
 float lon = 0;
 float alt = 0;
+int16_t ax = 0;
+int16_t ay = 0;
+int16_t az = 0;
+int16_t gx = 0;
+int16_t gy = 0;
+int16_t gz = 0;
 int64_t ecefx = 0;
 int64_t ecefy = 0;
 int64_t ecefz = 0;
@@ -95,6 +111,7 @@ uint8_t gngsa[3] = { };
 
 uint8_t fixtype = 0;
 uint8_t fixmode = 0;
+
 int8_t mobile = 0;              // Mobile data on line
 int8_t gotfix = 0;
 int8_t lonforce = 0;
@@ -117,6 +134,8 @@ time_t moving = 0;
 char iccid[22] = { };
 char imei[22] = { };
 
+uint8_t gok = 0;
+
 float tempc = -999;
 
 #define MINL	0.1
@@ -126,6 +145,27 @@ SemaphoreHandle_t cmd_mutex = NULL;
 SemaphoreHandle_t ack_semaphore = NULL;
 int pmtk = 0;                   // Waiting ack
 SemaphoreHandle_t at_mutex = NULL;
+
+void g_poll (void);
+
+typedef struct datalog_s datalog_t;
+struct datalog_s
+{
+   time_t base;
+   // Data for each 1/10th of second
+   float lat[10];
+   float lon[10];
+   float speed[10];
+   int16_t ax[10];              // Accel
+   int16_t ay[10];
+   int16_t gx[10];              // Gyro
+   int16_t gy[10];
+   int16_t gz[10];
+};
+datalog_t *datalog = NULL;
+int datalogi = 0,
+   datalogo = 0;
+#define DATALOGMAX 36000        // One hour recording
 
 void
 fixstatus (void)
@@ -519,6 +559,9 @@ nmea (char *s)
                gotfix = 1;
          }
       }
+      g_poll ();
+      // Create log entry
+      // TODO
       return;
    }
    if (*f[0] == 'G' && !strcmp (f[0] + 2, "ZDA") && n >= 5)
@@ -599,6 +642,17 @@ nmea (char *s)
 }
 
 void
+datalog_task (void *z)
+{
+	while(1)
+	{
+		sleep(1);
+		// Send log data
+		// TODO
+	}
+}
+
+void
 nmea_task (void *z)
 {
    uint8_t buf[1000],
@@ -673,6 +727,178 @@ nmea_task (void *z)
 }
 
 void
+g_write (uint8_t address, uint8_t value)
+{
+   i2c_cmd_handle_t t = i2c_cmd_link_create ();
+   i2c_master_start (t);
+   i2c_master_write_byte (t, (gaddress << 1) | I2C_MASTER_WRITE, true);
+   i2c_master_write_byte (t, address, true);
+   i2c_master_write_byte (t, value, true);
+   i2c_master_stop (t);
+   esp_err_t e = i2c_master_cmd_begin (gport, t, 10 / portTICK_PERIOD_MS);
+   i2c_cmd_link_delete (t);
+   if (e)
+      revk_error (TAG, "I2C write error: %s", esp_err_to_name (e));
+}
+
+int
+g_read (uint8_t address)
+{
+   uint8_t v = 0;
+   i2c_cmd_handle_t t = i2c_cmd_link_create ();
+   i2c_master_start (t);
+   i2c_master_write_byte (t, (gaddress << 1) | I2C_MASTER_WRITE, true);
+   i2c_master_write_byte (t, address, true);
+   i2c_master_start (t);
+   i2c_master_write_byte (t, (gaddress << 1) | I2C_MASTER_READ, true);
+   i2c_master_read_byte (t, &v, I2C_MASTER_LAST_NACK);
+   i2c_master_stop (t);
+   esp_err_t e = i2c_master_cmd_begin (gport, t, 10 / portTICK_PERIOD_MS);
+   i2c_cmd_link_delete (t);
+   if (e)
+   {
+      revk_error (TAG, "I2C read error: %s", esp_err_to_name (e));
+      return -1;
+   }
+   return v;
+}
+
+int
+g_readn (uint8_t address, void *addr, uint16_t n)
+{
+   i2c_cmd_handle_t t = i2c_cmd_link_create ();
+   i2c_master_start (t);
+   i2c_master_write_byte (t, (gaddress << 1) | I2C_MASTER_WRITE, true);
+   i2c_master_write_byte (t, address, true);
+   i2c_master_start (t);
+   i2c_master_write_byte (t, (gaddress << 1) | I2C_MASTER_READ, true);
+   if (n > 1)
+      i2c_master_read (t, addr, n - 1, I2C_MASTER_ACK);
+   i2c_master_read_byte (t, addr + n - 1, I2C_MASTER_LAST_NACK);
+   i2c_master_stop (t);
+   esp_err_t e = i2c_master_cmd_begin (gport, t, 10 / portTICK_PERIOD_MS);
+   i2c_cmd_link_delete (t);
+   if (e)
+   {
+      revk_error (TAG, "I2C read error: %s", esp_err_to_name (e));
+      return -1;
+   }
+   return n;
+}
+
+void
+g_init (void)
+{                               // Init G sensor
+   if (i2c_driver_install (gport, I2C_MODE_MASTER, 0, 0, 0))
+   {
+      ESP_LOGE (TAG, "I2C install fail");
+      return;
+   }
+   i2c_config_t config = {
+      .mode = I2C_MODE_MASTER,
+      .sda_io_num = gsda,
+      .scl_io_num = gscl,
+      .sda_pullup_en = true,
+      .scl_pullup_en = true,
+      .master.clk_speed = 400000,
+   };
+   if (i2c_param_config (gport, &config))
+   {
+      i2c_driver_delete (gport);
+      revk_error (TAG, "I2C config fail");
+      gscl = gsda = -1;
+      return;
+   }
+   i2c_set_timeout (gport, 400000);
+   int v = g_read (117),
+      try = 20;
+   while (v < 0 && try--)
+   {
+      sleep (1);
+      v = g_read (117);
+   }
+   if (v < 0)
+   {
+      revk_error (TAG, "GY-521 No reply");
+      return;
+   }
+   if ((v & 0x7E) != (gaddress & 0x7E))
+   {
+      revk_error (TAG, "GY-521 ID Wrong (%02X)", v);
+      return;
+   }
+   g_write (107, 0);            // Wake up, 8MHz clock
+   g_write (25, 7);             // 1MHz ?
+   g_write (27, (gscale & 3) << 3);
+   g_write (28, (ascale & 3) << 3);
+   if (usefifo)
+   {
+      g_write (35, 0x78);       // FIFO_EN Gyro and accel, all axis
+      g_write (106, 0x40);      // USER_CTTL FIFO_EN
+#if 0                           // Slow
+      g_write (108, (arate & 3) << 6);  // PWR_MGMT_2
+      g_write (107, 0x28);      // Wake up, cycle and no temp
+#endif
+   }
+   gok = 1;
+}
+
+void
+g_poll (void)
+{                               // Poll data from FiFO
+   uint8_t data[12];
+   if (!gok)
+      return;                   // Non G-Force sensor
+   void debug (void)
+   {
+      if (!gdebug)
+         return;
+      int16_t ax = (data[0] << 8) | data[1];
+      int16_t ay = (data[2] << 8) | data[3];
+      int16_t az = (data[4] << 8) | data[5];
+      int16_t gx = (data[6] << 8) | data[7];
+      int16_t gy = (data[8] << 8) | data[9];
+      int16_t gz = (data[10] << 8) | data[11];
+      revk_info (TAG, "Data %d/%d/%d %d/%d/%d", ax, ay, az, gx, gy, gz);
+   }
+   if (usefifo)
+   {
+      char b[2];
+      if (g_readn (114, b, sizeof (b)) < 0)
+         return;
+      int fifo = (b[0] << 8) + b[1];
+      revk_info (TAG, "FIFO %d", fifo);
+      fifo = (fifo / 12) * 12;  // Blocks of 12 bytes
+      int v = 0;
+      while (fifo)
+      {
+         for (int p = 0; p < 12; p++)
+         {
+            v = g_read (116);
+            if (v < 0)
+               break;
+            data[p] = v;
+         }
+         if (v < 0)
+            break;
+         debug ();
+         fifo -= 12;
+      }
+      if (fifo)
+      {                         // FIFO reset
+         revk_error (TAG, "FIFO reset");
+         g_write (106, 0x00);
+         g_write (106, 0x04);
+         g_write (106, 0x40);
+      }
+      return;
+   }
+   if (g_readn (59, data, 6) < 0 || g_readn (67, data + 6, 6) < 0)
+      return;
+   debug ();
+}
+
+void
 app_main ()
 {
    cmd_mutex = xSemaphoreCreateMutex ();        // Shared command access
@@ -696,15 +922,15 @@ app_main ()
 #undef b
 #undef h
 #undef s
+   datalog = malloc (sizeof (datalog_t) * DATALOGMAX);
+   if (!datalog)
+      revk_error (TAG, "Failed to allocate log space");
    if (mtu > 1488)
       mtu = 1488;
-   // Main task...
    if (gpspps >= 0)
       gpio_set_direction (gpspps, GPIO_MODE_INPUT);
    if (gpsfix >= 0)
       gpio_set_direction (gpsfix, GPIO_MODE_INPUT);
-   if (gpspps >= 0)
-      gpio_set_direction (gpspps, GPIO_MODE_INPUT);
    if (gpsen >= 0)
    {                            // Enable
       gpio_set_level (gpsen, 1);
@@ -713,10 +939,18 @@ app_main ()
    gps_connect (gpsbaud);
    if (gpsrx >= 0)
       revk_task ("NMEA", nmea_task, NULL);
-   while(1)
+   if(datalog)
+	   revk_task("Datalog",datalog_task,NULL);
+   if (gscl >= 0 && gsda >= 0)
+      g_init ();
+   while (1)
    {
-	   sleep(1);
-	         if (gpsstarted < 0)
+      sleep (1);
+      if (gpstx >= 0 && gpsrx >= 0 && gpsstarted < 0)
          gps_init ();
+      if (gpstx < 0 || gpsrx < 0)
+      {                         // Logging just G forces
+         g_poll ();
+      }
    }
 }
