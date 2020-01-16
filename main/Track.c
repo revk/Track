@@ -165,7 +165,7 @@ struct datalog_s
 datalog_t *datalog = NULL;
 int datalogi = 0,
    datalogo = 0;
-#define DATALOGMAX 36000        // One hour recording
+#define DATALOGMAX 7200        // One hour recording
 
 void
 fixstatus (void)
