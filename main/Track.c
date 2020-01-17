@@ -142,30 +142,28 @@ float tempc = -999;
 time_t gpszda = 0;              // Last ZDA
 
 SemaphoreHandle_t cmd_mutex = NULL;
-SemaphoreHandle_t ack_semaphore = NULL;
+SemaphoreHandle_t ack_mutex = NULL;
+SemaphoreHandle_t datalog_mutex = NULL;
 int pmtk = 0;                   // Waiting ack
-SemaphoreHandle_t at_mutex = NULL;
 
-void g_poll (void);
+void g_poll (time_t, uint8_t);
 
 typedef struct datalog_s datalog_t;
 struct datalog_s
 {
-   time_t base;
+   time_t when;
    // Data for each 1/10th of second
    float lat[10];
    float lon[10];
    float speed[10];
    int16_t ax[10];              // Accel
    int16_t ay[10];
-   int16_t gx[10];              // Gyro
-   int16_t gy[10];
-   int16_t gz[10];
+   int16_t gz[10];              // Gyro
 };
 datalog_t *datalog = NULL;
-int datalogi = 0,
+volatile uint32_t datalogi = 0,
    datalogo = 0;
-#define DATALOGMAX 7200        // One hour recording
+#define DATALOGMAX (3600*5)     // Recording time
 
 void
 fixstatus (void)
@@ -205,7 +203,7 @@ void
 gps_cmd (const char *fmt, ...)
 {                               // Send command to UART
    if (pmtk)
-      xSemaphoreTake (ack_semaphore, 1000 * portTICK_PERIOD_MS);        // Wait for ACK from last command
+      xSemaphoreTake (ack_mutex, 1000 * portTICK_PERIOD_MS);    // Wait for ACK from last command
    char s[100];
    va_list ap;
    va_start (ap, fmt);
@@ -224,7 +222,7 @@ gps_cmd (const char *fmt, ...)
    xSemaphoreGive (cmd_mutex);
    if (!strncmp (s, "$PMTK", 5))
    {
-      xSemaphoreTake (ack_semaphore, 0);
+      xSemaphoreTake (ack_mutex, 0);
       pmtk = atoi (s + 5);
    } else
       pmtk = 0;
@@ -245,6 +243,12 @@ app_command (const char *tag, unsigned int len, const unsigned char *value)
    }
    if (!strcmp (tag, "connect"))
    {
+      if (xSemaphoreTake (datalog_mutex, 1000 * portTICK_PERIOD_MS) == pdTRUE)
+      {
+         datalogo = (datalogi + 1) % DATALOGMAX;        // Resend all
+         xSemaphoreGive (datalog_mutex);
+      }
+
       return "";
    }
    if (!strcmp (tag, "resend"))
@@ -393,7 +397,7 @@ nmea (char *s)
       int tag = atoi (f[1]);
       if (pmtk && pmtk == tag)
       {                         // ACK received
-         xSemaphoreGive (ack_semaphore);
+         xSemaphoreGive (ack_mutex);
          pmtk = 0;
       }
       int ok = atoi (f[2]);
@@ -558,10 +562,18 @@ nmea (char *s)
             if (!ecef && (lat || lon))
                gotfix = 1;
          }
+         // Time
+         char *p = f[1];
+         time_t now = (gpszda / 86400) * 86400 +
+            ((((p[0] - '0') * 10 + p[1] - '0') * 60 + (p[2] - '0') * 10 + p[3] - '0') * 60 + (p[4] - '0') * 10 + p[5] - '0');
+         if (now < gpszda)
+            now += 86400;       // Day wrap
+         p += 7;
+         uint8_t sub = 0;       // Sub seccond
+         if (isdigit (*p))
+            sub = *p - '0';
+         g_poll (now, sub);     // getting G-force data
       }
-      g_poll ();
-      // Create log entry
-      // TODO
       return;
    }
    if (*f[0] == 'G' && !strcmp (f[0] + 2, "ZDA") && n >= 5)
@@ -644,12 +656,34 @@ nmea (char *s)
 void
 datalog_task (void *z)
 {
-	while(1)
-	{
-		sleep(1);
-		// Send log data
-		// TODO
-	}
+   while (1)
+   {
+      sleep (1);
+      if (revk_offline ())
+         continue;
+      while (datalogi != datalogo)
+      {
+         if (xSemaphoreTake (datalog_mutex, 1000 * portTICK_PERIOD_MS) != pdTRUE)
+            continue;
+         datalog_t *d = &datalog[datalogo];
+         if (d->when)
+         {
+            for (uint8_t sub = 0; sub < 10; sub++)
+               if (d->ax[sub] || d->ay[sub] || d->gz[sub] || d->lat[sub] || d->lon[sub] || d->speed[sub])
+               {                // Log
+                  char temp[30];
+                  strftime (temp, sizeof (temp), "%FT%T", gmtime (&d->when));
+                  revk_info ("Data", "%s.%dZ %.2f/%.2f/%.2f %f/%f/%.2f", temp, sub,     //
+                             ((float) (((int32_t) d->ax[sub]) << ascale)) / 16384.0,    //
+                             ((float) (((int32_t) d->ay[sub]) << ascale)) / 16384.0,    //
+                             ((float) (((int32_t) d->gz[sub]) << gscale)) * 250.0 / 16384.0,    //
+                             d->lat[sub], d->lon[sub], d->speed[sub]);
+               }
+         }
+         datalogo = (datalogo + 1) % DATALOGMAX;
+         xSemaphoreGive (datalog_mutex);
+      }
+   }
 }
 
 void
@@ -844,66 +878,93 @@ g_init (void)
 }
 
 void
-g_poll (void)
+g_poll (time_t now, uint8_t sub)
 {                               // Poll data from FiFO
-   uint8_t data[12];
-   if (!gok)
-      return;                   // Non G-Force sensor
-   void debug (void)
+   if (gok)
    {
-      if (!gdebug)
-         return;
-      int16_t ax = (data[0] << 8) | data[1];
-      int16_t ay = (data[2] << 8) | data[3];
-      int16_t az = (data[4] << 8) | data[5];
-      int16_t gx = (data[6] << 8) | data[7];
-      int16_t gy = (data[8] << 8) | data[9];
-      int16_t gz = (data[10] << 8) | data[11];
-      revk_info (TAG, "Data %d/%d/%d %d/%d/%d", ax, ay, az, gx, gy, gz);
-   }
-   if (usefifo)
-   {
-      char b[2];
-      if (g_readn (114, b, sizeof (b)) < 0)
-         return;
-      int fifo = (b[0] << 8) + b[1];
-      revk_info (TAG, "FIFO %d", fifo);
-      fifo = (fifo / 12) * 12;  // Blocks of 12 bytes
-      int v = 0;
-      while (fifo)
+      uint8_t data[12];
+      void log (void)
       {
-         for (int p = 0; p < 12; p++)
+         ax = (data[0] << 8) | data[1];
+         ay = (data[2] << 8) | data[3];
+         az = (data[4] << 8) | data[5];
+         gx = (data[6] << 8) | data[7];
+         gy = (data[8] << 8) | data[9];
+         gz = (data[10] << 8) | data[11];
+         if (gdebug)
+            revk_info (TAG, "G-Data %d/%d/%d %d/%d/%d", ax, ay, az, gx, gy, gz);
+      }
+      if (usefifo)
+      {
+         char b[2];
+         if (g_readn (114, b, sizeof (b)) < 0)
+            return;
+         int fifo = (b[0] << 8) + b[1];
+         revk_info (TAG, "FIFO %d", fifo);
+         fifo = (fifo / 12) * 12;       // Blocks of 12 bytes
+         int v = 0;
+         while (fifo)
          {
-            v = g_read (116);
+            for (int p = 0; p < 12; p++)
+            {
+               v = g_read (116);
+               if (v < 0)
+                  break;
+               data[p] = v;
+            }
             if (v < 0)
                break;
-            data[p] = v;
+            log ();
+            fifo -= 12;
          }
-         if (v < 0)
-            break;
-         debug ();
-         fifo -= 12;
-      }
-      if (fifo)
-      {                         // FIFO reset
-         revk_error (TAG, "FIFO reset");
-         g_write (106, 0x00);
-         g_write (106, 0x04);
-         g_write (106, 0x40);
-      }
-      return;
+         if (fifo)
+         {                      // FIFO reset
+            revk_error (TAG, "FIFO reset");
+            g_write (106, 0x00);
+            g_write (106, 0x04);
+            g_write (106, 0x40);
+         }
+      } else if (g_readn (59, data, 6) >= 0 && g_readn (67, data + 6, 6) >= 0)
+         log ();
    }
-   if (g_readn (59, data, 6) < 0 || g_readn (67, data + 6, 6) < 0)
-      return;
-   debug ();
+   if (gpszda)
+   {
+      // Create log entry
+      if (datalog[datalogi].when != now)
+      {                         // Advance
+         if (xSemaphoreTake (datalog_mutex, 1000 * portTICK_PERIOD_MS) != pdTRUE)
+         {
+            revk_error (TAG, "Datalog advance error");
+            return;             // Failed?
+         }
+         datalogi = (datalogi + 1) % DATALOGMAX;
+         if (datalogi == datalogo)
+            datalogo = (datalogo + 1) % DATALOGMAX;
+         memset (&datalog[datalogi], 0, sizeof (datalog_t));
+         datalog[datalogi].when = now;
+         if (fixdebug)
+            revk_info (TAG, "%d.%d %d/%d/%d %f/%f/%f", now, sub, ax, ay, gz, lat, lon, speed);
+         xSemaphoreGive (datalog_mutex);
+      }
+      datalog_t *d = &datalog[datalogi];
+      d->lat[sub] = lat;
+      d->lon[sub] = lon;
+      d->speed[sub] = speed;
+      d->ax[sub] = ax;
+      d->ay[sub] = ay;
+      d->gz[sub] = gz;
+   }
 }
 
 void
 app_main ()
 {
-   cmd_mutex = xSemaphoreCreateMutex ();        // Shared command access
-   vSemaphoreCreateBinary (ack_semaphore);      // GPS ACK mutex
-   at_mutex = xSemaphoreCreateMutex (); // Shared command access
+   cmd_mutex = xSemaphoreCreateBinary ();
+   xSemaphoreGive (cmd_mutex);
+   ack_mutex = xSemaphoreCreateBinary ();
+   xSemaphoreGive (ack_mutex);
+   datalog_mutex = xSemaphoreCreateBinary ();
+   xSemaphoreGive (datalog_mutex);
    revk_init (&app_command);
 #define b(n,d,t) revk_register(#n,0,sizeof(n),&n,#d,SETTING_BOOLEAN);
 #define bl(n,d,t) revk_register(#n,0,sizeof(n),&n,#d,SETTING_BOOLEAN|SETTING_LIVE);
@@ -925,6 +986,7 @@ app_main ()
    datalog = malloc (sizeof (datalog_t) * DATALOGMAX);
    if (!datalog)
       revk_error (TAG, "Failed to allocate log space");
+   memset (datalog, 0, sizeof (datalog_t) * DATALOGMAX);
    if (mtu > 1488)
       mtu = 1488;
    if (gpspps >= 0)
@@ -939,8 +1001,8 @@ app_main ()
    gps_connect (gpsbaud);
    if (gpsrx >= 0)
       revk_task ("NMEA", nmea_task, NULL);
-   if(datalog)
-	   revk_task("Datalog",datalog_task,NULL);
+   if (datalog)
+      revk_task ("Datalog", datalog_task, NULL);
    if (gscl >= 0 && gsda >= 0)
       g_init ();
    while (1)
@@ -949,8 +1011,6 @@ app_main ()
       if (gpstx >= 0 && gpsrx >= 0 && gpsstarted < 0)
          gps_init ();
       if (gpstx < 0 || gpsrx < 0)
-      {                         // Logging just G forces
-         g_poll ();
-      }
+         g_poll (time (0), 0);
    }
 }
