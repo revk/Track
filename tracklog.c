@@ -178,12 +178,7 @@ main (int argc, const char *argv[])
                *type++ = 0;
          }
       }
-      if (!tag)
-      {
-         warnx ("No tag %s", topic);
-         return;
-      }
-      if (msg->payload)
+      if (tag&&type&&msg->payload)
       {
          char *val = malloc (msg->payloadlen + 1);
          memcpy (val, msg->payload, msg->payloadlen);
