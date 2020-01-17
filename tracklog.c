@@ -38,7 +38,7 @@ main (int argc, const char *argv[])
    const char *mqtthostname = NULL;
    const char *mqttusername = NULL;
    const char *mqttpassword = NULL;
-   const char *mqttappname = "GPS";
+   const char *mqttappname = "Track";
    const char *mqttid = NULL;
    const char *mqttconf = NULL;
    const char *mqttcafile = NULL;
@@ -170,7 +170,6 @@ main (int argc, const char *argv[])
       }
       char *type = NULL;
       char *tag = NULL;
-      char *message = topic;
       char *app = strchr (topic, '/');
       if (app)
       {
@@ -192,9 +191,14 @@ main (int argc, const char *argv[])
       char *val = malloc (msg->payloadlen + 1);
       memcpy (val, msg->payload, msg->payloadlen);
       val[msg->payloadlen] = 0;
-
-      // TODO
-
+      if(type&&!strcmp(type,"Data"))
+      {
+	      char when[30]="";
+	      float ax,ay,gz,lat,lon,speed;
+	      if(sscanf(val,"%22s %f/%f/%f %f/%f/%f",when,&ax,&ay,&gz,&lat,&lon,&speed)!=7)fprintf(stderr,"Unexpected %s",val);
+	      else
+		      sql_safe_query_free(&sql,sql_printf("REPLACE INTO `%S` SET device=%#s,utc=%#.21s,ax=%f,ay=%f,gz=%f,lat=%f,lon=%f,speed=%f",sqltrack,tag,when,ax,ay,gz,lat,lon,speed));
+      }
       free (val);
    }
    if (mqttcafile && (e = mosquitto_tls_set (mqtt, mqttcafile, NULL, NULL, NULL, NULL)))
