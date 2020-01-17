@@ -163,11 +163,6 @@ main (int argc, const char *argv[])
    {
       obj = obj;
       char *topic = strdupa (msg->topic);
-      if (!msg->payloadlen)
-      {
-         warnx ("No payload %s", topic);
-         return;
-      }
       char *type = NULL;
       char *tag = NULL;
       char *app = strchr (topic, '/');
@@ -188,50 +183,54 @@ main (int argc, const char *argv[])
          warnx ("No tag %s", topic);
          return;
       }
-      char *val = malloc (msg->payloadlen + 1);
-      memcpy (val, msg->payload, msg->payloadlen);
-      val[msg->payloadlen] = 0;
-      if (type && !strcmp (type, "Data"))
+      if (msg->payload)
       {
-         char when[30] = "";
-         float ax,
-           ay,
-           gz,
-           lat,
-           lon,
-           speed;
-         if (sscanf (val, "%22s %f/%f/%f %f/%f/%f", when, &ax, &ay, &gz, &lat, &lon, &speed) != 7)
-            fprintf (stderr, "Unexpected %s\n", val);
-         else
+         char *val = malloc (msg->payloadlen + 1);
+         memcpy (val, msg->payload, msg->payloadlen);
+         val[msg->payloadlen] = 0;
+         if (type && !strcmp (type, "Data"))
          {
-            if (isnan (ax))
-               ax = 0;          // Sanity
-            if (isnan (ay))
-               ay = 0;
-            if (isnan (gz))
-               gz = 0;
-            if (isnan (lat))
-               lat = 0;
-            if (isnan (lon))
-               lon = 0;
-            if (isnan (speed))
-               speed = 0;
-            if (!txn)
+            char when[30] = "";
+            float ax,
+              ay,
+              gz,
+              lat,
+              lon,
+              speed;
+            if (sscanf (val, "%22s %f/%f/%f %f/%f/%f", when, &ax, &ay, &gz, &lat, &lon, &speed) != 7)
+               fprintf (stderr, "Unexpected %s\n", val);
+            else
             {
-               txn = time (0) + 10;
-               sql_transaction (&sql);
-            }
-            sql_safe_query_free (&sql,
-                                 sql_printf ("REPLACE INTO `%S` SET device=%#s,utc=%#.21s,ax=%f,ay=%f,gz=%f,lat=%f,lon=%f,speed=%f",
-                                             sqltrack, tag, when, ax, ay, gz, lat, lon, speed));
-            if (txn && txn < time (0))
-            {
-               txn = 0;
-               sql_safe_commit (&sql);
+               if (isnan (ax))
+                  ax = 0;       // Sanity
+               if (isnan (ay))
+                  ay = 0;
+               if (isnan (gz))
+                  gz = 0;
+               if (isnan (lat))
+                  lat = 0;
+               if (isnan (lon))
+                  lon = 0;
+               if (isnan (speed))
+                  speed = 0;
+               if (!txn)
+               {
+                  sql_transaction (&sql);
+                  txn = time (0) + 10;  // Timeout and commit txn
+               }
+               sql_safe_query_free (&sql,
+                                    sql_printf
+                                    ("REPLACE INTO `%S` SET device=%#s,utc=%#.21s,ax=%f,ay=%f,gz=%f,lat=%f,lon=%f,speed=%f",
+                                     sqltrack, tag, when, ax, ay, gz, lat, lon, speed));
             }
          }
+         free (val);
       }
-      free (val);
+      if (txn && txn < time (0))
+      {                         // Assumes we get some messages when not tracking
+         txn = 0;
+         sql_safe_commit (&sql);
+      }
    }
    if (mqttcafile && (e = mosquitto_tls_set (mqtt, mqttcafile, NULL, NULL, NULL, NULL)))
       warnx ("MQTT cert failed (%s) %s", mqttcafile, mosquitto_strerror (e));
