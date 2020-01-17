@@ -191,13 +191,43 @@ main (int argc, const char *argv[])
       char *val = malloc (msg->payloadlen + 1);
       memcpy (val, msg->payload, msg->payloadlen);
       val[msg->payloadlen] = 0;
-      if(type&&!strcmp(type,"Data"))
+      if (type && !strcmp (type, "Data"))
       {
-	      char when[30]="";
-	      float ax,ay,gz,lat,lon,speed;
-	      if(sscanf(val,"%22s %f/%f/%f %f/%f/%f",when,&ax,&ay,&gz,&lat,&lon,&speed)!=7)fprintf(stderr,"Unexpected %s",val);
-	      else
-		      sql_safe_query_free(&sql,sql_printf("REPLACE INTO `%S` SET device=%#s,utc=%#.21s,ax=%f,ay=%f,gz=%f,lat=%f,lon=%f,speed=%f",sqltrack,tag,when,ax,ay,gz,lat,lon,speed));
+         char when[30] = "";
+         float ax,
+           ay,
+           gz,
+           lat,
+           lon,
+           speed;
+         if (sscanf (val, "%22s %f/%f/%f %f/%f/%f", when, &ax, &ay, &gz, &lat, &lon, &speed) != 7)
+            fprintf (stderr, "Unexpected %s\n", val);
+         else
+         {
+            if (isnan (ax))
+               ax = 0;          // Sanity
+            if (isnan (ay))
+               ay = 0;
+            if (isnan (gz))
+               gz = 0;
+            if (isnan (lat))
+               lat = 0;
+            if (isnan (lon))
+               lon = 0;
+            if (isnan (speed))
+               speed = 0;
+            sql_safe_query_free (&sql,
+                                 sql_printf ("REPLACE INTO `%S` SET device=%#s,utc=%#.21s,ax=%f,ay=%f,gz=%f,lat=%f,lon=%f,speed=%f",
+                                             sqltrack, tag, when, ax, ay, gz, lat, lon, speed));
+            time_t now = time (0);
+            static time_t next = 0;
+            if (now >= next)
+            {
+               next = now + 10;
+               sql_safe_commit (&sql);
+               sql_transaction (&sql);
+            }
+         }
       }
       free (val);
    }
@@ -210,6 +240,7 @@ main (int argc, const char *argv[])
    if (e)
       errx (1, "MQTT connect failed (%s) %s", mqtthostname, mosquitto_strerror (e));
    sql_real_connect (&sql, sqlhostname, sqlusername, sqlpassword, sqldatabase, 0, NULL, 0, 1, sqlconffile);
+   sql_transaction (&sql);
    e = mosquitto_loop_forever (mqtt, -1, 1);
    if (e)
       errx (1, "MQTT loop failed %s", mosquitto_strerror (e));

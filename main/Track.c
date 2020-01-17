@@ -146,7 +146,7 @@ SemaphoreHandle_t ack_mutex = NULL;
 SemaphoreHandle_t datalog_mutex = NULL;
 int pmtk = 0;                   // Waiting ack
 
-void g_poll (time_t, uint8_t);
+void datalog_now (time_t, uint8_t);
 
 typedef struct datalog_s datalog_t;
 struct datalog_s
@@ -572,7 +572,7 @@ nmea (char *s)
          uint8_t sub = 0;       // Sub seccond
          if (isdigit (*p))
             sub = *p - '0';
-         g_poll (now, sub);     // getting G-force data
+         datalog_now (now, sub);     // getting G-force data
       }
       return;
    }
@@ -676,7 +676,7 @@ datalog_task (void *z)
                   revk_info ("Data", "%s.%dZ %.2f/%.2f/%.2f %f/%f/%.2f", temp, sub,     //
                              ((float) (((int32_t) d->ax[sub]) << ascale)) / 16384.0,    //
                              ((float) (((int32_t) d->ay[sub]) << ascale)) / 16384.0,    //
-                             ((float) (((int32_t) d->gz[sub]) << gscale)) * 250.0 / 16384.0,    //
+                             ((float) (((int32_t) d->gz[sub]) << gscale)) * 250.0 / 32768.0,    //
                              d->lat[sub], d->lon[sub], d->speed[sub]);
                }
          }
@@ -878,7 +878,7 @@ g_init (void)
 }
 
 void
-g_poll (time_t now, uint8_t sub)
+datalog_now (time_t now, uint8_t sub)
 {                               // Poll data from FiFO
    if (gok)
    {
@@ -927,9 +927,8 @@ g_poll (time_t now, uint8_t sub)
       } else if (g_readn (59, data, 6) >= 0 && g_readn (67, data + 6, 6) >= 0)
          log ();
    }
-   if (gpszda)
-   {
-      // Create log entry
+   if (gpszda&&(speed||gpstx<0||gpstx<0))
+   { // Create log entry
       if (datalog[datalogi].when != now)
       {                         // Advance
          if (xSemaphoreTake (datalog_mutex, 1000 * portTICK_PERIOD_MS) != pdTRUE)
@@ -1011,6 +1010,6 @@ app_main ()
       if (gpstx >= 0 && gpsrx >= 0 && gpsstarted < 0)
          gps_init ();
       if (gpstx < 0 || gpsrx < 0)
-         g_poll (time (0), 0);
+         datalog_now (time (0), 0);
    }
 }
