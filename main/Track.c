@@ -572,7 +572,7 @@ nmea (char *s)
          uint8_t sub = 0;       // Sub seccond
          if (isdigit (*p))
             sub = *p - '0';
-         datalog_now (now, sub);     // getting G-force data
+         datalog_now (now, sub);        // getting G-force data
       }
       return;
    }
@@ -927,8 +927,8 @@ datalog_now (time_t now, uint8_t sub)
       } else if (g_readn (59, data, 6) >= 0 && g_readn (67, data + 6, 6) >= 0)
          log ();
    }
-   if (gpszda&&(speed||gpstx<0||gpstx<0))
-   { // Create log entry
+   if (gpszda && (speed || gpstx < 0 || gpstx < 0 || !(now % 500)))
+   {                            // Create log entry
       if (datalog[datalogi].when != now)
       {                         // Advance
          if (xSemaphoreTake (datalog_mutex, 1000 * portTICK_PERIOD_MS) != pdTRUE)

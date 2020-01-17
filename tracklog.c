@@ -138,9 +138,8 @@ main (int argc, const char *argv[])
       obj = obj;
       rc = rc;
       char *sub = NULL;
-      asprintf (&sub, "state/%s/#", mqttappname);
-      int e = mosquitto_subscribe (mqtt, NULL, sub,
-                                   0);
+      asprintf (&sub, "state/%s/#", mqttappname);       // Note, picks up state 0 and any keep alive messages
+      int e = mosquitto_subscribe (mqtt, NULL, sub, 0);
       if (e)
          errx (1, "MQTT subscribe failed %s (%s)", mosquitto_strerror (e), sub);
       if (debug)
@@ -159,6 +158,7 @@ main (int argc, const char *argv[])
       obj = obj;
       rc = rc;
    }
+   time_t txn = 0;
    void message (struct mosquitto *mqtt, void *obj, const struct mosquitto_message *msg)
    {
       obj = obj;
@@ -216,16 +216,18 @@ main (int argc, const char *argv[])
                lon = 0;
             if (isnan (speed))
                speed = 0;
+            if (!txn)
+            {
+               txn = time (0) + 10;
+               sql_transaction (&sql);
+            }
             sql_safe_query_free (&sql,
                                  sql_printf ("REPLACE INTO `%S` SET device=%#s,utc=%#.21s,ax=%f,ay=%f,gz=%f,lat=%f,lon=%f,speed=%f",
                                              sqltrack, tag, when, ax, ay, gz, lat, lon, speed));
-            time_t now = time (0);
-            static time_t next = 0;
-            if (now >= next)
+            if (txn && txn < time (0))
             {
-               next = now + 10;
+               txn = 0;
                sql_safe_commit (&sql);
-               sql_transaction (&sql);
             }
          }
       }
@@ -240,7 +242,6 @@ main (int argc, const char *argv[])
    if (e)
       errx (1, "MQTT connect failed (%s) %s", mqtthostname, mosquitto_strerror (e));
    sql_real_connect (&sql, sqlhostname, sqlusername, sqlpassword, sqldatabase, 0, NULL, 0, 1, sqlconffile);
-   sql_transaction (&sql);
    e = mosquitto_loop_forever (mqtt, -1, 1);
    if (e)
       errx (1, "MQTT loop failed %s", mosquitto_strerror (e));
