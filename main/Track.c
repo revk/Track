@@ -251,6 +251,11 @@ app_command (const char *tag, unsigned int len, const unsigned char *value)
 
       return "";
    }
+   if (!strcmp (tag, "status"))
+   {
+      fixstatus ();
+      return "";
+   }
    if (!strcmp (tag, "time"))
    {
       if (!len)
