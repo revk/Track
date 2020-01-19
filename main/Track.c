@@ -46,7 +46,7 @@ extern void hmac_sha256 (const uint8_t * key, size_t key_len, const uint8_t * da
 	s8(gsda,-1,		G-Force SDA)	\
 	s8(gint,-1,		G-Force INT)	\
 	u8(arate,0,		G-Force accel rate 0-3) \
-	u8(ascale,0,		G-Force accel scale 0-3) \
+	u8(ascale,1,		G-Force accel scale 0-3) \
 	u8(gscale,0,		G-Force dyro scale 0-3) \
 	u8(gaddress,0x68,	G-Force I2C address) \
 	b(usefifo,N,		G-Force use FIFO) \
@@ -241,7 +241,7 @@ app_command (const char *tag, unsigned int len, const unsigned char *value)
    {
       return "";
    }
-   if (!strcmp (tag, "connect"))
+   if (!strcmp (tag, "connect") || !strcmp (tag, "resend"))
    {
       if (xSemaphoreTake (datalog_mutex, 1000 * portTICK_PERIOD_MS) == pdTRUE)
       {
@@ -249,10 +249,6 @@ app_command (const char *tag, unsigned int len, const unsigned char *value)
          xSemaphoreGive (datalog_mutex);
       }
 
-      return "";
-   }
-   if (!strcmp (tag, "resend"))
-   {                            // Resend log data
       return "";
    }
    if (!strcmp (tag, "time"))
