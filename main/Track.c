@@ -1,4 +1,5 @@
 // GPS/G-Force high speed logger for go-carting
+// lastspeed=speed;
 // Copyright (c) 2020 Adrian Kennard, Andrews & Arnold Limited, see LICENSE file (GPL)
 static const char TAG[] = "Track";
 
@@ -83,7 +84,8 @@ settings
 #undef h
 #undef s
 // Current info values as at end of GGA processing
-float speed = 0;
+float speed = 0,
+   lastspeed = 0;
 float bearing = 0;
 float lat = 0;
 float lon = 0;
@@ -624,6 +626,7 @@ nmea (char *s)
    }
    if (*f[0] == 'G' && !strcmp (f[0] + 2, "VTG") && n >= 10)
    {
+      lastspeed = speed;
       if (!courseforce)
          course = strtof (f[1], NULL);
       if (!speedforce)
@@ -680,7 +683,7 @@ datalog_task (void *z)
       sleep (1);
       if (revk_offline ())
          continue;
-      char last[30]="";
+      char last[30] = "";
       while (datalogi != datalogo)
       {
          if (xSemaphoreTake (datalog_mutex, 1000 * portTICK_PERIOD_MS) != pdTRUE)
@@ -703,7 +706,7 @@ datalog_task (void *z)
          xSemaphoreGive (datalog_mutex);
       }
       if (*last)
-         revk_info ("Ready", last);       // Caught up
+         revk_info ("Ready", last);     // Caught up
    }
 }
 
@@ -948,7 +951,7 @@ datalog_now (time_t now, uint8_t sub)
       } else if (g_readn (59, data, 6) >= 0 && g_readn (67, data + 6, 6) >= 0)
          log ();
    }
-   if (gpszda && (speed || gpstx < 0 || gpstx < 0))
+   if (gpszda && (speed || lastspeed || gpstx < 0 || gpstx < 0))
    {                            // Create log entry
       if (datalog[datalogi].when != now)
       {                         // Advance
