@@ -178,7 +178,7 @@ main (int argc, const char *argv[])
                *type++ = 0;
          }
       }
-      if (tag&&type&&msg->payload)
+      if (tag && type && msg->payload)
       {
          char *val = malloc (msg->payloadlen + 1);
          memcpy (val, msg->payload, msg->payloadlen);
@@ -222,9 +222,18 @@ main (int argc, const char *argv[])
          free (val);
       }
       if (txn && txn < time (0))
-      {                         // Assumes we get some messages when not tracking
+      {                         // Assumes we get some messages when not tracking - normally "Ready" when caught up completely
          txn = 0;
          sql_safe_commit (&sql);
+         if (tag&&msg->payloadlen)
+         { // Advise we have caught up and committed
+            char *temp;
+            asprintf (&temp, "command/%s/%s/Ready", mqttappname, tag);
+            e = mosquitto_publish (mqtt, NULL, temp, msg->payloadlen, msg->payload, 1, 0);
+            if (e)
+               errx (1, "MQTT publish failed %s (%s)", mosquitto_strerror (e), temp);
+            free (temp);
+         }
       }
    }
    if (mqttcafile && (e = mosquitto_tls_set (mqtt, mqttcafile, NULL, NULL, NULL, NULL)))

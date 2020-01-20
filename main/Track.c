@@ -163,6 +163,7 @@ struct datalog_s
 datalog_t *datalog = NULL;
 volatile uint32_t datalogi = 0,
    datalogo = 0;
+volatile time_t datalog_base = 0;
 #define DATALOGMAX (3600*5)     // Recording time
 
 void
@@ -228,6 +229,16 @@ gps_cmd (const char *fmt, ...)
       pmtk = 0;
 }
 
+void
+resend (void)
+{
+   if (xSemaphoreTake (datalog_mutex, 1000 * portTICK_PERIOD_MS) == pdTRUE)
+   {
+      datalogo = (datalogi + 1) % DATALOGMAX;   // Resend all
+      xSemaphoreGive (datalog_mutex);
+   }
+}
+
 const char *
 app_command (const char *tag, unsigned int len, const unsigned char *value)
 {
@@ -243,18 +254,25 @@ app_command (const char *tag, unsigned int len, const unsigned char *value)
    }
    if (!strcmp (tag, "connect") || !strcmp (tag, "resend"))
    {
-      if (xSemaphoreTake (datalog_mutex, 1000 * portTICK_PERIOD_MS) == pdTRUE)
-      {
-         datalogo = (datalogi + 1) % DATALOGMAX;        // Resend all
-         xSemaphoreGive (datalog_mutex);
-      }
-
+      resend ();
       return "";
    }
    if (!strcmp (tag, "status"))
    {
       fixstatus ();
       return "";
+   }
+   if (!strcmp (tag, "Ready"))
+   {
+      if (value && *value)
+      {
+         struct tm t = { };
+         char *z = strptime ((char *) value, "%Y-%m-%d %H:%M:%S", &t);
+         if (!z || !*z)
+            t.tm_isdst = -1;
+         datalog_base = mktime (&t);
+         return "";
+      }
    }
    if (!strcmp (tag, "time"))
    {
@@ -662,19 +680,19 @@ datalog_task (void *z)
       sleep (1);
       if (revk_offline ())
          continue;
+      char last[30]="";
       while (datalogi != datalogo)
       {
          if (xSemaphoreTake (datalog_mutex, 1000 * portTICK_PERIOD_MS) != pdTRUE)
             continue;
          datalog_t *d = &datalog[datalogo];
-         if (d->when)
+         if (d->when > datalog_base)
          {
             for (uint8_t sub = 0; sub < 10; sub++)
                if (d->ax[sub] || d->ay[sub] || d->gz[sub] || d->lat[sub] || d->lon[sub] || d->speed[sub])
                {                // Log
-                  char temp[30];
-                  strftime (temp, sizeof (temp), "%FT%T", gmtime (&d->when));
-                  revk_info ("Data", "%s.%dZ %.2f/%.2f/%.2f %f/%f/%.2f", temp, sub,     //
+                  strftime (last, sizeof (last), "%FT%T", gmtime (&d->when));
+                  revk_info ("Data", "%s.%dZ %.2f/%.2f/%.2f %f/%f/%.2f", last, sub,     //
                              ((float) (((int32_t) d->ax[sub]) << ascale)) / 16384.0,    //
                              ((float) (((int32_t) d->ay[sub]) << ascale)) / 16384.0,    //
                              ((float) (((int32_t) d->gz[sub]) << gscale)) * 250.0 / 32768.0,    //
@@ -684,6 +702,8 @@ datalog_task (void *z)
          datalogo = (datalogo + 1) % DATALOGMAX;
          xSemaphoreGive (datalog_mutex);
       }
+      if (*last)
+         revk_info ("Ready", last);       // Caught up
    }
 }
 
@@ -953,8 +973,7 @@ datalog_now (time_t now, uint8_t sub)
       d->ax[sub] = ax;
       d->ay[sub] = ay;
       d->gz[sub] = gz;
-   } else if (!sub && !(now % 60))
-      revk_info ("Idle", "");
+   }
 }
 
 void
